@@ -11,7 +11,7 @@ os.chdir('/lustre/scratch/kiviaho/hillock_club_senescence')
 
 
 ####################################### Lyu et al. 2024 data formatting #######################################
-
+""" 
 data_path = './single-cell/lyu_2024/raw_data'
 sample_sheet = pd.read_csv('./single-cell/lyu_2024/lyu_2024_sample_sheet.txt',sep='\t')
 
@@ -40,6 +40,7 @@ adata = ad.concat(adata_dict,join='outer') # Concatenate all the samples
 # Save the data as a raw object
 adata.write_h5ad('./single-cell/lyu_2024/adata_obj.h5ad')
 
+ """
 ####################################### Data processing as described in Lyu et al. 2024 #######################################
 
 adata = sc.read_h5ad('./single-cell/lyu_2024/adata_obj.h5ad') # 236,856 cells × 33,538 genes
@@ -203,12 +204,95 @@ plt.savefig('./plots/scs_dataset_umaps/lyu_2024_sample_umap_harmony.pdf')
 # Save the annotated dataset
 adata.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_annotated_20241217.h5ad')
 
+################################# Define and save subsets #################################
+
+
+#################### Epithelial cells ####################
+
 # Subset epithelial and save
 adata_epithelial = adata[adata.obs['celltype'] == 'Epithelial'].copy()
+
+# Re-integrate based on just the epithelial cells
+adata_epithelial.X = adata_epithelial.layers['log1p'].copy()
+
+# Scale to uniform mean & variance
+sc.pp.scale(adata_epithelial)
+
+# Perform PCA on the dataframe
+sc.pp.pca(adata_epithelial,n_comps=50)
+
+# Correct components using Harmony
+sc.external.pp.harmony_integrate(adata_epithelial,key='sample')
+
+seed = 519552572
+
+# Compute the neighborhood graph
+sc.pp.neighbors(adata_epithelial, use_rep='X_pca_harmony', random_state=seed)
+sc.tl.umap(adata_epithelial,random_state=seed)
+
+sc.set_figure_params(figsize=(4, 4))
+sc.pl.umap(adata_epithelial, color=['phenotype', 'sample'], show=False, save='_epithelial_clusters.png')
+
+
+res = 1.0
+sc.tl.leiden(adata_epithelial, key_added='leiden_epithelial', resolution=res, random_state=seed)
+adata_epithelial.obs = adata_epithelial.obs.rename(columns={'leiden_epithelial':f'leiden_epithelial_res{res}'})
+
+""" 
+# Find a clustering range 
+# Create a range of floats between 1 and 0.2 with a space of 0.05
+res_range = np.arange(0.6, 0.2, -0.02)
+
+# This code ensures that the top 10 most populous clusters contain at least 95% of the total number of cells. If there are fewer than 10 clusters, it will print a failure message.
+for res in res_range:
+    res = res.round(2)
+    sc.tl.leiden(adata_epithelial, key_added=f'leiden_epithelial', resolution=res, random_state=seed)
+    val_counts = adata_epithelial.obs[f'leiden_epithelial'].value_counts()
+    # Ensure there are at least 10 clusters before checking the top 10 most populous clusters
+    if len(val_counts) >= 10:
+        top_10_pct = val_counts.iloc[:10].sum() / len(adata_epithelial)  # Sum of the top 10 most populous clusters
+        n_clust = len(val_counts)
+        if top_10_pct >= 0.95:  # Top 10 clusters should contain at least 95% of all cells
+            print(f'{res}: pass, {top_10_pct:.1%}, n clusters: {n_clust} !')
+            break
+        else:
+            print(f'{res}: fail, {top_10_pct:.1%}, n clusters: {n_clust}')
+    else:
+        print(f'{res}: fail, less than 10 clusters')
+
+adata_epithelial.obs = adata_epithelial.obs.rename(columns={'leiden_epithelial':f'leiden_epithelial_res{res}'})
+ """
 adata_epithelial.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_epithelial.h5ad')
+
+##### Do the same wth myeloid cells #####
 
 # Subset Myeloid and save
 adata_myeloid = adata[adata.obs['celltype'] == 'Myeloid'].copy()
+
+# Re-integrate based on just the myeloid cells
+adata_myeloid.X = adata_myeloid.layers['log1p'].copy()
+
+# Scale to uniform mean & variance
+sc.pp.scale(adata_myeloid)
+
+# Perform PCA on the dataframe
+sc.pp.pca(adata_myeloid,n_comps=50)
+
+# Correct components using Harmony
+sc.external.pp.harmony_integrate(adata_myeloid,key='sample')
+
+seed = 519552572
+
+# Compute the neighborhood graph
+sc.pp.neighbors(adata_myeloid, use_rep='X_pca_harmony', random_state=seed)
+sc.tl.umap(adata_myeloid,random_state=seed)
+
+sc.set_figure_params(figsize=(4, 4))
+sc.pl.umap(adata_myeloid, color=['phenotype', 'sample'], show=False, save='_myeloid_clusters.png')
+
+res = 1.0
+sc.tl.leiden(adata_myeloid, key_added=f'leiden_myeloid_res{res}', resolution=res, random_state=seed)
+
 adata_myeloid.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_myeloid.h5ad')
 
 ### FINISHED
