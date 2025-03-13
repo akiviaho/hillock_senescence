@@ -201,10 +201,39 @@ plt.savefig('./plots/scs_dataset_umaps/lyu_2024_sample_umap_harmony.png', dpi=12
 plt.savefig('./plots/scs_dataset_umaps/lyu_2024_sample_umap_harmony.pdf')
 
 
+#### Calculate sample-specific percentages and save them #####
+
+col_name = 'celltype'
+
+obs_df = adata.obs.copy()
+obs_df['count'] = 1 # Add a count term
+cell_count = obs_df[['sample','count']].groupby('sample').sum()
+
+# Need to have at least 40 cells per sample to be considered
+#cell_count = cell_count[cell_count['count'] >= 20] # 50k epi --> 100, 10k myeloids --> 20
+celltype_pct = pd.DataFrame(index = cell_count.index)
+
+for cat in obs_df[col_name].cat.categories:
+    df = obs_df[obs_df[col_name]==cat].copy()
+    df = df[['sample','count']].groupby('sample').sum()
+    df = df.loc[celltype_pct.index]
+    celltype_pct[cat+' pct'] = (df['count'] / cell_count['count'])
+
+# Convert to percentage
+celltype_pct = celltype_pct * 100
+if (celltype_pct.sum(axis=1).round(4)==100).all():
+    print('Succesfully created percentage dataframe')
+
+celltype_pct['phenotype'] = celltype_pct.index.map(obs_df[['sample','phenotype']].groupby('sample').first().to_dict()['phenotype'])
+celltype_pct['phenotype'] = pd.Categorical(celltype_pct['phenotype'],categories=obs_df['phenotype'].cat.categories)
+
+celltype_pct.to_csv('./lyu_2024_celltype_percentages.csv')
+
 # Save the annotated dataset
 adata.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_annotated_20241217.h5ad')
 
 ################################# Define and save subsets #################################
+adata =  sc.read_h5ad('./single-cell/lyu_2024/adata_obj_harmony_annotated_20241217.h5ad')
 
 
 #################### Epithelial cells ####################
@@ -238,33 +267,11 @@ res = 1.0
 sc.tl.leiden(adata_epithelial, key_added='leiden_epithelial', resolution=res, random_state=seed)
 adata_epithelial.obs = adata_epithelial.obs.rename(columns={'leiden_epithelial':f'leiden_epithelial_res{res}'})
 
-""" 
-# Find a clustering range 
-# Create a range of floats between 1 and 0.2 with a space of 0.05
-res_range = np.arange(0.6, 0.2, -0.02)
-
-# This code ensures that the top 10 most populous clusters contain at least 95% of the total number of cells. If there are fewer than 10 clusters, it will print a failure message.
-for res in res_range:
-    res = res.round(2)
-    sc.tl.leiden(adata_epithelial, key_added=f'leiden_epithelial', resolution=res, random_state=seed)
-    val_counts = adata_epithelial.obs[f'leiden_epithelial'].value_counts()
-    # Ensure there are at least 10 clusters before checking the top 10 most populous clusters
-    if len(val_counts) >= 10:
-        top_10_pct = val_counts.iloc[:10].sum() / len(adata_epithelial)  # Sum of the top 10 most populous clusters
-        n_clust = len(val_counts)
-        if top_10_pct >= 0.95:  # Top 10 clusters should contain at least 95% of all cells
-            print(f'{res}: pass, {top_10_pct:.1%}, n clusters: {n_clust} !')
-            break
-        else:
-            print(f'{res}: fail, {top_10_pct:.1%}, n clusters: {n_clust}')
-    else:
-        print(f'{res}: fail, less than 10 clusters')
-
-adata_epithelial.obs = adata_epithelial.obs.rename(columns={'leiden_epithelial':f'leiden_epithelial_res{res}'})
- """
+# Save
 adata_epithelial.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_epithelial.h5ad')
 
-##### Do the same wth myeloid cells #####
+
+#################### Myeloid cells ####################
 
 # Subset Myeloid and save
 adata_myeloid = adata[adata.obs['celltype'] == 'Myeloid'].copy()
@@ -295,278 +302,37 @@ sc.tl.leiden(adata_myeloid, key_added=f'leiden_myeloid_res{res}', resolution=res
 
 adata_myeloid.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_myeloid.h5ad')
 
-### FINISHED
 
+#################### T cells ####################
 
-####################################### Data preprocessing with own pipeline #######################################
+# Subset T cells and save
+adata_tcell = adata[adata.obs['celltype'] == 'T cell'].copy()
 
+# Re-integrate based on just the T cells
+adata_tcell.X = adata_tcell.layers['log1p'].copy()
 
-##### QC & preprocessing #######
-adata = sc.read_h5ad('./single-cell/lyu_2024/adata_obj.h5ad')
+# Scale to uniform mean & variance
+sc.pp.scale(adata_tcell)
 
-def qc_filters(adata, remove_doublets=True):
-    # mitochondrial genes
-    adata.var["mt"] = adata.var_names.str.startswith("MT-")
-    # Calculate the percentage
-    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True, log1p=False)
-    # Leave out cells with > 10% mitochondrial reads
-    adata = adata[adata.obs.pct_counts_mt < 10, :] # 20
-    # Filter out cells by using the same metrics as in Lyu et al. 2024
-    sc.pp.filter_cells(adata, min_genes=100)
-    sc.pp.filter_cells(adata, max_genes=2500)
-    sc.pp.filter_genes(adata, min_cells= 3)
-    sc.pp.filter_genes(adata, min_counts= 10)
-    # Filter out cells with more than one HBB gene counts
-    adata = adata[adata[:, 'HBB'].X <= 1] 
-    if remove_doublets:
-        sc.external.pp.scrublet(adata)
-        adata = adata[adata.obs['predicted_doublet']==False]
-    return adata
+# Perform PCA on the dataframe
+sc.pp.pca(adata_tcell,n_comps=50)
 
-# Run filtering
-adata = qc_filters(adata)
-'''
+# Correct components using Harmony
+sc.external.pp.harmony_integrate(adata_tcell,key='sample')
 
-Original unfiltered: 
-236,856 cells × 33,538 genes
-
-With the same filtering as in previous integration:
-
-Automatically set threshold at doublet score = 0.84
-Detected doublet rate = 0.0%
-Estimated detectable doublet fraction = 0.9%
-Overall doublet rate:
-        Expected   = 5.0%
-        Estimated  = 0.1%
-
-Post filtering:
-154,699 cells × 25,708 genes
-
-Post filtering:
-91,160 × 22,324
-
-'''
-#sc.pp.filter_genes(adata, min_counts= 10) # Not sure if ran properly as gave an error on 0 count genes?
-# Run normalization
-scib.preprocessing.normalize(adata,precluster=False, sparsify=False)
-adata
-# Save the normalized data object
-adata.write_h5ad('./single-cell/lyu_2024/adata_obj_qc_normalized_orig.h5ad')
-
-############################### Data analysis (post SCVI) ###############################
-
-adata = sc.read_h5ad('./single-cell/lyu_2024/adata_obj_qc_normalized_orig_scvi_integrated.h5ad')
-
-# Plot UMAP
-sc.set_figure_params(figsize=(4, 4))
-sc.pl.umap(adata, color=['VI_clusters', 'phenotype', 'sample'], show=False, save=True)
-
-#### Create a dotplot for celltype annotation ####
-
-# Define marker genes
-def keep_specified_markers(marker_list, keep_vals):
-    new_marker_list = {}
-    for k, v in marker_list.items():
-        new_marker_list[k] = [val for val in v if val in keep_vals]
-    return new_marker_list
-
-refined_markers = {
-    'Epithelial': ['EPCAM', 'KRT18', 'KRT8', 'KLK3', 'AR', 'MSMB', 'KRT5', 'KRT15', 'TP63', 'KRT7', 'KRT19', 'KRT4'],
-    'Endothelial': ['VWF', 'SELE', 'FLT1', 'ENG'],
-    'Fibroblast': ['LUM', 'DCN', 'IGF1', 'APOD', 'STC1', 'FBLN1', 'COL1A2', 'C7', 'IGFBP5', 'ACTA2'],
-    'SMC': ['RGS5', 'ACTA2', 'TAGLN', 'BGN', 'MYL9', 'MYLK', 'CALD1'],
-    'Mast': ['KIT', 'TPSB2', 'TPSAB1', 'CPA3', 'VWA5A', 'IL1RL1', 'CTSG', 'SLC18A2', 'ACSL4', 'MS4A2', 'GATA2'],
-    'T cell': ['CD3D', 'CD3E', 'CD3G', 'CD8A', 'CD8B', 'IL7R', 'NKG7', 'CD7', 'GNLY'],
-    'B cell': ['CD79A', 'MS4A1', 'CD79B', 'IGHM', 'CD83'],
-    'Myeloid': ['C1QA', 'C1QB', 'C1QC', 'CD68', 'LYZ', 'IL1A', 'IL1B', 'S100A9', 'S100A8', 'CXCL8', 'FCGR3A', 'CSF1R'],
-    'Neuronal': ['PLP1', 'MPZ', 'MT1H'],
-    'Dendritic': ['IRF7', 'IRF4', 'FCER1A', 'CD1C'],
-    'Plasma': ['IGJ', 'MZB1']
-}
-
-
-# Plot a dotplot with the markers
-sns.set_theme(style='white', font_scale=0.8)
-markers = keep_specified_markers(refined_markers, adata.var_names.tolist())
-sc.tl.dendrogram(adata, groupby='VI_clusters', use_rep='X_scVI', random_state=34524623)
-fig, ax = plt.subplots(figsize=(8, 12))
-sc.pl.dotplot(adata, markers, groupby='VI_clusters', dendrogram=True, log=False, swap_axes=True, vmax=4, ax=ax, show=False)
-plt.tight_layout()
-plt.savefig('./plots/scs_dataset_dotplots/lyu_2024_celltype_marker_dotplot_scvi.png', dpi=120)
-plt.savefig('./plots/scs_dataset_dotplots/lyu_2024_celltype_marker_dotplot_scvi.pdf')
-
-# Figuring out missing cell type identities
-cl = '28'
-sc.tl.rank_genes_groups(adata, groupby='VI_clusters', groups=[cl], random_state=34524623)
-deg_df = sc.get.rank_genes_groups_df(adata, group=cl, pval_cutoff=0.05, log2fc_min=1)
-print(deg_df[:20])
-
-# Annotate cell type clusters
-celltype_annotation_dict = {
-    'Epithelial': ['1','3','12','15','18','23','24','26','27'],
-    'Endothelial': ['5','17','22'],
-    'Fibroblast_muscle': ['9','14'],
-    'Myeloid': ['8','11','19'],
-    'T cell': ['0','2','4','6','7','13','20'],
-    'B cell': ['10'],
-    'Mast': ['16'],
-    'Plasma':['21'],
-    'Neuronal':['25']
-    }
-
-# Create a reverse mapping from number to cell type
-number_to_celltype = {}
-for celltype, numbers in celltype_annotation_dict.items():
-    for number in numbers:
-        number_to_celltype[number] = celltype
-
-# Create the annotation column
-adata.obs['celltype'] = adata.obs['VI_clusters'].map(number_to_celltype)
-
-# Plot an UMAP of the resulting annotation
-fig, ax = plt.subplots(figsize=(5, 5))
-sc.pl.umap(adata, color='celltype', ax=ax, show=False, legend_loc="on data")
-plt.tight_layout()
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_celltype_umap_scvi.png', dpi=120)
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_celltype_umap_scvi.pdf')
-
-# Plot an UMAP of phenotype
-fig, ax = plt.subplots(figsize=(5, 5))
-sc.pl.umap(adata, color='phenotype', ax=ax, show=False, legend_loc="on data")
-plt.tight_layout()
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_phenotype_umap_scvi.png', dpi=120)
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_phenotype_umap_scvi.pdf')
-
-
-# Plot an UMAP of sample
-fig, ax = plt.subplots(figsize=(6, 4.5))
-sc.pl.umap(adata, color='phenotype', ax=ax, show=False)#, legend_loc="on data")
-plt.tight_layout()
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_sample_umap_scvi.png', dpi=120)
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_sample_umap_scvi.pdf')
-
-
-# Save the annotated dataset
-adata.write_h5ad('./single-cell/lyu_2024/adata_obj_scvi_annotated_20241212.h5ad')
-
-# Subset epithelial and save
-adata_epithelial = adata[adata.obs['celltype'] == 'Epithelial'].copy()
-adata_epithelial.write_h5ad('./single-cell/lyu_2024/adata_obj_scvi_epithelial.h5ad')
-
-# Subset Myeloid and save
-adata_myeloid = adata[adata.obs['celltype'] == 'Myeloid'].copy()
-adata_myeloid.write_h5ad('./single-cell/lyu_2024/adata_obj_scvi_myeloid.h5ad')
-
-
-############################### Data analysis (without SCVI) ###############################
-adata = sc.read_h5ad('./single-cell/lyu_2024/adata_obj_qc_normalized_orig.h5ad')
-adata.uns['log1p']["base"] = None
-
-# Set a global random seed
-np.random.seed(435924236)
-
-# Ensure var names are unique
-adata.var_names_make_unique()
-
-# Identify highly variable genes
-sc.pp.highly_variable_genes(adata, n_top_genes=2000)
-
-# Perform PCA
-sc.tl.pca(adata, random_state=435924236)
+seed = 2534268
 
 # Compute the neighborhood graph
-sc.pp.neighbors(adata, random_state=435924236)
+sc.pp.neighbors(adata_tcell, use_rep='X_pca_harmony', random_state=seed)
+sc.tl.umap(adata_tcell,random_state=seed)
 
-# Perform clustering
-sc.tl.leiden(adata, key_added="leiden", resolution=1, random_state=435924236)
-
-# Compute UMAP
-sc.tl.umap(adata, random_state=435924236)
-
-# Plot UMAP
 sc.set_figure_params(figsize=(4, 4))
-sc.pl.umap(adata, color=['leiden', 'phenotype', 'sample'], show=False, save=True)
+sc.pl.umap(adata_tcell, color=['phenotype', 'sample'], show=False, save='_T_cell_clusters.png')
 
-#### Create a dotplot for celltype annotation ####
+res = 1.0
+sc.tl.leiden(adata_tcell, key_added=f'leiden_t_cell_res{res}', resolution=res, random_state=seed)
 
-# Define marker genes
-def keep_specified_markers(marker_list, keep_vals):
-    new_marker_list = {}
-    for k, v in marker_list.items():
-        new_marker_list[k] = [val for val in v if val in keep_vals]
-    return new_marker_list
-
-refined_markers = {
-    'Epithelial': ['EPCAM', 'KRT18', 'KRT8', 'KLK3', 'AR', 'MSMB', 'KRT5', 'KRT15', 'TP63', 'KRT7', 'KRT19', 'KRT4'],
-    'Endothelial': ['VWF', 'SELE', 'FLT1', 'ENG'],
-    'Fibroblast': ['LUM', 'DCN', 'IGF1', 'APOD', 'STC1', 'FBLN1', 'COL1A2', 'C7', 'IGFBP5', 'ACTA2'],
-    'SMC': ['RGS5', 'ACTA2', 'TAGLN', 'BGN', 'MYL9', 'MYLK', 'CALD1'],
-    'Mast': ['KIT', 'TPSB2', 'TPSAB1', 'CPA3', 'VWA5A', 'IL1RL1', 'CTSG', 'SLC18A2', 'ACSL4', 'MS4A2', 'GATA2'],
-    'T cell': ['CD3D', 'CD3E', 'CD3G', 'CD8A', 'CD8B', 'IL7R', 'NKG7', 'CD7', 'GNLY'],
-    'B cell': ['CD79A', 'MS4A1', 'CD79B', 'IGHM', 'CD83'],
-    'Myeloid': ['C1QA', 'C1QB', 'C1QC', 'CD68', 'LYZ', 'IL1A', 'IL1B', 'S100A9', 'S100A8', 'CXCL8', 'FCGR3A', 'CSF1R'],
-    'Neuronal': ['PLP1', 'MPZ', 'MT1H'],
-    'Dendritic': ['IRF7', 'IRF4', 'FCER1A', 'CD1C'],
-    'Plasma': ['IGJ', 'MZB1']
-}
+adata_tcell.write_h5ad('./single-cell/lyu_2024/adata_obj_harmony_t_cell.h5ad')
 
 
-# Plot a dotplot with the markers
-sns.set_theme(style='white', font_scale=0.8)
-markers = keep_specified_markers(refined_markers, adata.var_names.tolist())
-sc.tl.dendrogram(adata, groupby='leiden', use_rep='X_pca', random_state=34524623)
-fig, ax = plt.subplots(figsize=(8, 12))
-sc.pl.dotplot(adata, markers, groupby='leiden', dendrogram=True, log=False, swap_axes=True, vmax=4, ax=ax, show=False)
-plt.tight_layout()
-plt.savefig('./plots/scs_dataset_dotplots/lyu_2024_celltype_marker_dotplot.png', dpi=120)
-plt.savefig('./plots/scs_dataset_dotplots/lyu_2024_celltype_marker_dotplot.pdf')
-
-# Figuring out missing cell type identities
-cl = '28'
-sc.tl.rank_genes_groups(adata, groupby='leiden', groups=[cl], random_state=34524623)
-deg_df = sc.get.rank_genes_groups_df(adata, group=cl, pval_cutoff=0.05, log2fc_min=1)
-print(deg_df[:20])
-
-# Annotate cell type clusters
-celltype_annotation_dict = {
-    'Epithelial': ['0','2','7','8','11','12','14','19','21','22','24','26','28','29','30','31','32','33','34'],
-    'Endothelial': ['6','20','23'],
-    'Fibroblast_muscle': ['10','18'],
-    'Myeloid': ['9','13'],
-    'T cell': ['1','3','4','5','16','17','27'],
-    'B cell': ['15'],
-    'Mast': ['25'],
-    'drop': ['28'] # <-- HBB, HBA1, HBA2 red blood cells
-    }
-
-# Create a reverse mapping from number to cell type
-number_to_celltype = {}
-for celltype, numbers in celltype_annotation_dict.items():
-    for number in numbers:
-        number_to_celltype[number] = celltype
-
-# Create the annotation column
-adata.obs['celltype'] = adata.obs['leiden'].map(number_to_celltype)
-
-# Drop the columns to drop
-adata = adata[~(adata.obs['celltype'] == 'drop')]
-
-# Plot an UMAP of the resulting annotation
-fig, ax = plt.subplots(figsize=(5, 5))
-sc.pl.umap(adata, color='celltype', ax=ax, show=False, legend_loc="on data")
-plt.tight_layout()
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_celltype_umap.png', dpi=120)
-plt.savefig('./plots/scs_dataset_umaps/lyu_2024_celltype_umap.pdf')
-
-# Save the annotated dataset
-adata.write_h5ad('./single-cell/lyu_2024/adata_obj_annotated_20241212.h5ad')
-
-# Subset epithelial and save
-adata_epithelial = adata[adata.obs['celltype'] == 'Epithelial'].copy()
-adata_epithelial.write_h5ad('./single-cell/lyu_2024/adata_obj_epithelial.h5ad')
-
-# Subset Myeloid and save
-adata_myeloid = adata[adata.obs['celltype'] == 'Myeloid'].copy()
-adata_myeloid.write_h5ad('./single-cell/lyu_2024/adata_obj_myeloid.h5ad')
-
-
+### FINISHED
